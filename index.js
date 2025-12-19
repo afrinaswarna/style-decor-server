@@ -164,52 +164,90 @@ async function run() {
       res.send({ url: session.url });
     });
 
-    app.patch("/payment-success", async (req, res) => {
-      const sessionId = req.query.session_id;
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
-      console.log("session retrieve", session);
-      if (session.payment_status === "paid") {
-        const id = session.metadata.bookingId;
-        const query = { _id: new ObjectId(id) };
-        const trackingId = generateTrackingId()
-        const update = {
-          $set: {
-            paymentStatus: "paid",
-            // deliveryStatus: "pending-pickup",
-            trackingId:trackingId
-          },
-        }
-        const result = await bookingCollection.updateOne(query, update)
-         const payment = {
-          amount: session.amount_total / 100,
-          currency: session.currency,
-          customerEmail: session.customer_email,
-          bookingId: session.metadata.bookingId,
-          serviceName: session.metadata.serviceName,
-          transactionId: session.payment_intent,
-          paymentStatus: session.payment_status,
-          paidAt: new Date(),
-          trackingId: trackingId,
-        };
+   app.patch("/payment-success", async (req, res) => {
+  try {
+    const sessionId = req.query.session_id;
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+console.log('session id',session)
+    const transactionId = session.payment_intent;
+    const trackingId = generateTrackingId();
 
-        
-        if (session.payment_status === "paid") {
-          const resultPayment = await paymentCollection.insertOne(payment);
+    // 1️⃣ Check if payment already exists
+    const existingPayment = await paymentCollection.findOne({
+      transactionId,
+    });
 
-          // logTracking(trackingId,'pending-pickup')
-          res.send({
-            success: true,
-            modifyParcel: result,
-            trackingId: trackingId,
-            transactionId: session.payment_intent,
-            paymentInfo: resultPayment,
-          });
-        }
-        
+    if (existingPayment) {
+      return res.send({
+        message: "payment already done",
+        transactionId,
+        trackingId: existingPayment.trackingId,
+      });
+    }
+
+    // 2️⃣ If payment is not paid
+    if (session.payment_status !== "paid") {
+      return res.send({ success: false });
+    }
+
+    // 3️⃣ Update booking
+    const bookingId = session.metadata.bookingId;
+
+    const updateResult = await bookingCollection.updateOne(
+      { _id: new ObjectId(bookingId) },
+      {
+        $set: {
+          paymentStatus: "paid",
+          trackingId,
+        },
+      }
+    );
+
+    // 4️⃣ Save payment
+    const payment = {
+      amount: session.amount_total / 100,
+      currency: session.currency,
+      customerEmail: session.customer_email,
+      bookingId,
+      serviceName: session.metadata.serviceName,
+      transactionId,
+      paymentStatus: session.payment_status,
+      paidAt: new Date(),
+      trackingId,
+    };
+
+    const paymentResult = await paymentCollection.insertOne(payment);
+
+    // 5️⃣ Send response ONCE
+    return res.send({
+      success: true,
+      modifyParcel: updateResult,
+      trackingId,
+      transactionId,
+      paymentInfo: paymentResult,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).send({ success: false, error: "Server error" });
+  }
+});
+
+app.get("/payments", verifyFBToken, async (req, res) => {
+      const email = req.query.email;
+      // console.log(req.headers);
+      const query = {};
+      if (email) {
+        query.customerEmail = email;
       }
 
-      res.send({ success: false });
-    });
+      if (email !== req.decoded_email) {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
+      const result = await cursor.toArray();
+      res.send(result);
+    })
+
 
     await client.db("admin").command({ ping: 1 });
     console.log(
