@@ -4,6 +4,14 @@ const cors = require("cors");
 require("dotenv").config();
 const stripe = require("stripe")(process.env.STRIP_SECRET);
 const port = process.env.PORT || 3000;
+const crypto = require("crypto");
+
+function generateTrackingId() {
+  const prefix = "PRCL";
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYMMDD
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6 chars
+  return `${prefix}-${date}-${random}`;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -50,10 +58,8 @@ async function run() {
     const userCollection = db.collection("user");
     const serviceCollection = db.collection("service");
     const bookingCollection = db.collection("bookings");
-    const paymentCollection = db.collection("payments")
+    const paymentCollection = db.collection("payments");
 
-   
-   
     // user related apis
 
     app.post("/users", async (req, res) => {
@@ -70,10 +76,8 @@ async function run() {
       res.send(result);
     });
 
-
-
     // service related apis
-     app.get("/services", async (req, res) => {
+    app.get("/services", async (req, res) => {
       const cursor = serviceCollection.find();
       const result = await cursor.toArray();
       res.send(result);
@@ -96,8 +100,6 @@ async function run() {
       const result = await serviceCollection.insertOne(services);
       res.send(result);
     });
-
-
 
     // booking related apis
     app.get("/bookings", async (req, res) => {
@@ -126,19 +128,19 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await bookingCollection.deleteOne(query);
+
       res.send(result);
     });
 
-
     // payment related api
-      app.post("/payment-checkout-session", async (req, res) => {
+    app.post("/servicePayment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
       const amount = parseInt(paymentInfo.price) * 100;
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
             price_data: {
-              currency: "USD",
+              currency: "usd",
               product_data: {
                 name: paymentInfo.serviceName,
               },
@@ -154,13 +156,60 @@ async function run() {
         },
 
         customer_email: paymentInfo.userEmail,
-        success_url: `${process.env.SITE_DOMAIN}dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}dashboard/payment-cancelled`,
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
       });
+      console.log(session);
 
       res.send({ url: session.url });
     });
 
+    app.patch("/payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      console.log("session retrieve", session);
+      if (session.payment_status === "paid") {
+        const id = session.metadata.bookingId;
+        const query = { _id: new ObjectId(id) };
+        const trackingId = generateTrackingId()
+        const update = {
+          $set: {
+            paymentStatus: "paid",
+            // deliveryStatus: "pending-pickup",
+            trackingId:trackingId
+          },
+        }
+        const result = await bookingCollection.updateOne(query, update)
+         const payment = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          bookingId: session.metadata.bookingId,
+          serviceName: session.metadata.serviceName,
+          transactionId: session.payment_intent,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
+          trackingId: trackingId,
+        };
+
+        
+        if (session.payment_status === "paid") {
+          const resultPayment = await paymentCollection.insertOne(payment);
+
+          // logTracking(trackingId,'pending-pickup')
+          res.send({
+            success: true,
+            modifyParcel: result,
+            trackingId: trackingId,
+            transactionId: session.payment_intent,
+            paymentInfo: resultPayment,
+          });
+        }
+        
+      }
+
+      res.send({ success: false });
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log(
