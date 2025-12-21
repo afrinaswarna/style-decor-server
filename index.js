@@ -59,9 +59,20 @@ async function run() {
     const serviceCollection = db.collection("service");
     const bookingCollection = db.collection("bookings");
     const paymentCollection = db.collection("payments");
-    const decoratorsCollection = db.collection('decorator')
+    const decoratorsCollection = db.collection("decorator");
 
     // user related apis
+    app.get("/users", async (req, res) => {
+      const cursor = userCollection.find();
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+    app.get('/users/:email/role',async(req,res)=>{
+      const email = req.params.email;
+      const query = {email} 
+      const user = await userCollection.findOne(query)
+      res.send({role:user?.role || 'user'})
+    })
 
     app.post("/users", async (req, res) => {
       const user = req.body;
@@ -76,6 +87,25 @@ async function run() {
       const result = await userCollection.insertOne(user);
       res.send(result);
     });
+    app.patch(
+      "/users/:id",
+      // verifyFBToken,
+      // verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            role: roleInfo.role,
+          },
+        };
+        const result = await userCollection.updateOne(query, updatedDoc);
+        res.send(result);
+      }
+    );
+
+
 
     // service related apis
     app.get("/services", async (req, res) => {
@@ -165,77 +195,72 @@ async function run() {
       res.send({ url: session.url });
     });
 
-   app.patch("/payment-success", async (req, res) => {
-  try {
-    const sessionId = req.query.session_id;
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    app.patch("/payment-success", async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-    const transactionId = session.payment_intent;
-    const trackingId = generateTrackingId();
+        const transactionId = session.payment_intent;
+        const trackingId = generateTrackingId();
 
-    
-    const existingPayment = await paymentCollection.findOne({
-      transactionId,
-    });
+        const existingPayment = await paymentCollection.findOne({
+          transactionId,
+        });
 
-    if (existingPayment) {
-      return res.send({
-        message: "payment already done",
-        transactionId,
-        trackingId: existingPayment.trackingId,
-      });
-    }
+        if (existingPayment) {
+          return res.send({
+            message: "payment already done",
+            transactionId,
+            trackingId: existingPayment.trackingId,
+          });
+        }
 
-   
-    if (session.payment_status !== "paid") {
-      return res.send({ success: false });
-    }
+        if (session.payment_status !== "paid") {
+          return res.send({ success: false });
+        }
 
-    
-    const bookingId = session.metadata.bookingId;
+        const bookingId = session.metadata.bookingId;
 
-    const updateResult = await bookingCollection.updateOne(
-      { _id: new ObjectId(bookingId) },
-      {
-        $set: {
-          paymentStatus: "paid",
+        const updateResult = await bookingCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          {
+            $set: {
+              paymentStatus: "paid",
+              trackingId,
+            },
+          }
+        );
+
+        const payment = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          bookingId,
+          serviceName: session.metadata.serviceName,
+          transactionId,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
           trackingId,
-        },
+        };
+
+        const paymentResult = await paymentCollection.insertOne(payment);
+
+        return res.send({
+          success: true,
+          modifyParcel: updateResult,
+          trackingId,
+          transactionId,
+          paymentInfo: paymentResult,
+        });
+      } catch (error) {
+        console.error(error);
+        return res.status(500).send({ success: false, error: "Server error" });
       }
-    );
-
-   
-    const payment = {
-      amount: session.amount_total / 100,
-      currency: session.currency,
-      customerEmail: session.customer_email,
-      bookingId,
-      serviceName: session.metadata.serviceName,
-      transactionId,
-      paymentStatus: session.payment_status,
-      paidAt: new Date(),
-      trackingId,
-    };
-
-    const paymentResult = await paymentCollection.insertOne(payment);
-
-    
-    return res.send({
-      success: true,
-      modifyParcel: updateResult,
-      trackingId,
-      transactionId,
-      paymentInfo: paymentResult,
     });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send({ success: false, error: "Server error" });
-  }
-});
 
-app.get("/payments", verifyFBToken, async (req, res) => {
+    app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
-     
+
       const query = {};
       if (email) {
         query.customerEmail = email;
@@ -247,26 +272,26 @@ app.get("/payments", verifyFBToken, async (req, res) => {
       const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
       const result = await cursor.toArray();
       res.send(result);
-    })
-// decorators related apis
-app.get('/decorators',async(req,res)=>{
-  const query = {}
-  if(req.query.status){
-    query.status = req.query.status
-  }
-  const cursor = decoratorsCollection.find(query)
-  const result = await cursor.toArray()
-  res.send(result)
-})
+    });
+    // decorators related apis
+    app.get("/decorators", async (req, res) => {
+      const query = {};
+      if (req.query.status) {
+        query.status = req.query.status;
+      }
+      const cursor = decoratorsCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
 
-app.post('/decorators',async(req,res)=>{
-  const decorator = req.body;
-      decorator.status = "pending"; 
+    app.post("/decorators", async (req, res) => {
+      const decorator = req.body;
+      decorator.status = "pending";
       decorator.createdAt = new Date();
       const result = await decoratorsCollection.insertOne(decorator);
       res.send(result);
-})
-app.patch("/decorators/:id", verifyFBToken, async (req, res) => {
+    });
+    app.patch("/decorators/:id", verifyFBToken, async (req, res) => {
       const status = req.body.status;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -291,12 +316,12 @@ app.patch("/decorators/:id", verifyFBToken, async (req, res) => {
       res.send(result);
     });
 
-    app.delete('/decorators/:id',async(req,res)=>{
+    app.delete("/decorators/:id", async (req, res) => {
       const id = req.query.id;
-      const query = {_id:new ObjectId(id)}
-      const result = await decoratorsCollection.deleteOne(query)
-      res.send(result)
-    })
+      const query = { _id: new ObjectId(id) };
+      const result = await decoratorsCollection.deleteOne(query);
+      res.send(result);
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log(
