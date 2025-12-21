@@ -61,18 +61,28 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const decoratorsCollection = db.collection("decorator");
 
+    
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded_email;
+      query = { email };
+      const user = await userCollection.findOne(query);
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ massage: "forbidden access" });
+      }
+      next();
+    };
     // user related apis
     app.get("/users", async (req, res) => {
       const cursor = userCollection.find();
       const result = await cursor.toArray();
       res.send(result);
     });
-    app.get('/users/:email/role',async(req,res)=>{
+    app.get("/users/:email/role", async (req, res) => {
       const email = req.params.email;
-      const query = {email} 
-      const user = await userCollection.findOne(query)
-      res.send({role:user?.role || 'user'})
-    })
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
+    });
 
     app.post("/users", async (req, res) => {
       const user = req.body;
@@ -88,9 +98,9 @@ async function run() {
       res.send(result);
     });
     app.patch(
-      "/users/:id",
-      // verifyFBToken,
-      // verifyAdmin,
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
       async (req, res) => {
         const id = req.params.id;
         const roleInfo = req.body;
@@ -104,8 +114,6 @@ async function run() {
         res.send(result);
       }
     );
-
-
 
     // service related apis
     app.get("/services", async (req, res) => {
