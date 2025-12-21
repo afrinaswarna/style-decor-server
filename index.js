@@ -59,6 +59,7 @@ async function run() {
     const serviceCollection = db.collection("service");
     const bookingCollection = db.collection("bookings");
     const paymentCollection = db.collection("payments");
+    const decoratorsCollection = db.collection('decorator')
 
     // user related apis
 
@@ -159,7 +160,7 @@ async function run() {
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
       });
-      console.log(session);
+      // console.log(session);
 
       res.send({ url: session.url });
     });
@@ -168,11 +169,11 @@ async function run() {
   try {
     const sessionId = req.query.session_id;
     const session = await stripe.checkout.sessions.retrieve(sessionId);
-console.log('session id',session)
+
     const transactionId = session.payment_intent;
     const trackingId = generateTrackingId();
 
-    // 1️⃣ Check if payment already exists
+    
     const existingPayment = await paymentCollection.findOne({
       transactionId,
     });
@@ -185,12 +186,12 @@ console.log('session id',session)
       });
     }
 
-    // 2️⃣ If payment is not paid
+   
     if (session.payment_status !== "paid") {
       return res.send({ success: false });
     }
 
-    // 3️⃣ Update booking
+    
     const bookingId = session.metadata.bookingId;
 
     const updateResult = await bookingCollection.updateOne(
@@ -203,7 +204,7 @@ console.log('session id',session)
       }
     );
 
-    // 4️⃣ Save payment
+   
     const payment = {
       amount: session.amount_total / 100,
       currency: session.currency,
@@ -218,7 +219,7 @@ console.log('session id',session)
 
     const paymentResult = await paymentCollection.insertOne(payment);
 
-    // 5️⃣ Send response ONCE
+    
     return res.send({
       success: true,
       modifyParcel: updateResult,
@@ -234,7 +235,7 @@ console.log('session id',session)
 
 app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
-      // console.log(req.headers);
+     
       const query = {};
       if (email) {
         query.customerEmail = email;
@@ -247,7 +248,55 @@ app.get("/payments", verifyFBToken, async (req, res) => {
       const result = await cursor.toArray();
       res.send(result);
     })
+// decorators related apis
+app.get('/decorators',async(req,res)=>{
+  const query = {}
+  if(req.query.status){
+    query.status = req.query.status
+  }
+  const cursor = decoratorsCollection.find(query)
+  const result = await cursor.toArray()
+  res.send(result)
+})
 
+app.post('/decorators',async(req,res)=>{
+  const decorator = req.body;
+      decorator.status = "pending"; 
+      decorator.createdAt = new Date();
+      const result = await decoratorsCollection.insertOne(decorator);
+      res.send(result);
+})
+app.patch("/decorators/:id", verifyFBToken, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          status: status,
+          // workStatus: "available",
+        },
+      };
+      const result = await decoratorsCollection.updateOne(query, updatedDoc);
+
+      if (status === "approved") {
+        const email = req.body.email;
+        const userQuery = { email };
+        const updateUser = {
+          $set: {
+            role: "decorator",
+          },
+        };
+        const result = await userCollection.updateOne(userQuery, updateUser);
+      }
+      res.send(result);
+    });
+
+    app.delete('/decorators/:id',async(req,res)=>{
+      const id = req.query.id;
+      const query = {_id:new ObjectId(id)}
+      const result = await decoratorsCollection.deleteOne(query)
+      res.send(result)
+    })
 
     await client.db("admin").command({ ping: 1 });
     console.log(
