@@ -43,7 +43,7 @@ const verifyFBToken = async (req, res, next) => {
   try {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    console.log("after decoded", decoded);
+    // console.log("after decoded", decoded);
     req.decoded_email = decoded.email;
     next();
   } catch (error) {
@@ -61,7 +61,6 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const decoratorsCollection = db.collection("decorator");
 
-    
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded_email;
       query = { email };
@@ -72,8 +71,19 @@ async function run() {
       next();
     };
     // user related apis
-    app.get("/users", async (req, res) => {
-      const cursor = userCollection.find();
+    app.get("/users", verifyFBToken, async (req, res) => {
+      const searchUser = req.query.searchUser;
+      const query = {};
+      if (searchUser) {
+        query.$or = [
+          { displayName: { $regex: searchUser, $options: "i" } },
+          { email: { $regex: searchUser, $options: "i" } },
+        ];
+      }
+      const cursor = userCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(5);
       const result = await cursor.toArray();
       res.send(result);
     });
@@ -144,13 +154,13 @@ async function run() {
     app.get("/bookings", async (req, res) => {
       const query = {};
 
-      const { email } = req.query;
+      const { email, serviceStatus } = req.query;
       if (email) {
         query.userEmail = email;
       }
-      // if (deliveryStatus) {
-      //   query.deliveryStatus = deliveryStatus;
-      // }
+      if (serviceStatus) {
+        query.serviceStatus = serviceStatus;
+      }
       const options = { sort: { createdAt: -1 } };
       const cursor = bookingCollection.find(query, options);
       const result = await cursor.toArray();
@@ -162,6 +172,46 @@ async function run() {
       const result = await bookingCollection.insertOne(booking);
       res.send(result);
     });
+  app.patch("/bookings/:id", async (req, res) => {
+  try {
+    const { decoratorId, decoratorName, decoratorEmail } = req.body;
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id) || !ObjectId.isValid(decoratorId)) {
+      return res.status(400).send({ message: "Invalid ID format" });
+    }
+
+    // 1. Update Booking
+    const bookingResult = await bookingCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          serviceStatus: "decorator-assigned",
+          decoratorId: decoratorId,
+          decoratorName,
+          decoratorEmail,
+        },
+      }
+    );
+
+    // 2. Update Decorator
+    const decoratorResult = await decoratorsCollection.updateOne(
+      { _id: new ObjectId(decoratorId) },
+      { $set: { workStatus: "busy" } }
+    );
+
+    // Send back success if at least the booking was modified
+    res.send({ 
+      modifiedCount: bookingResult.modifiedCount, 
+      acknowledged: bookingResult.acknowledged 
+    });
+  } catch (error) {
+    console.error("Assignment Error:", error);
+    res.status(500).send({ message: "Internal Server Error" });
+  }
+});
+
+     
 
     app.delete("/bookings/:id", async (req, res) => {
       const id = req.params.id;
@@ -234,6 +284,7 @@ async function run() {
           {
             $set: {
               paymentStatus: "paid",
+              serviceStatus: "pending",
               trackingId,
             },
           }
@@ -282,14 +333,41 @@ async function run() {
       res.send(result);
     });
     // decorators related apis
+    // app.get("/decorators", async (req, res) => {
+    //   const query = {};
+    //   if (req.query.status) {
+    //     query.status = req.query.status;
+    //   }
+    //   const cursor = decoratorsCollection.find(query);
+    //   const result = await cursor.toArray();
+    //   res.send(result);
+    // });
+
     app.get("/decorators", async (req, res) => {
+      const { status, workStatus, district, expertise } = req.query;
+
       const query = {};
-      if (req.query.status) {
-        query.status = req.query.status;
+
+      if (status) {
+        query.status = status;
       }
-      const cursor = decoratorsCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
+
+      if (workStatus) {
+        query.workStatus = workStatus;
+      }
+
+      if (district) {
+        query.district = district;
+      }
+
+      if (expertise) {
+        // expertise is an ARRAY in MongoDB
+        query.expertise = { $in: [expertise] };
+      }
+
+      const decorators = await decoratorsCollection.find(query).toArray();
+
+      res.send(decorators);
     });
 
     app.post("/decorators", async (req, res) => {
@@ -299,30 +377,35 @@ async function run() {
       const result = await decoratorsCollection.insertOne(decorator);
       res.send(result);
     });
-    app.patch("/decorators/:id", verifyFBToken, async (req, res) => {
-      const status = req.body.status;
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          status: status,
-          // workStatus: "available",
-        },
-      };
-      const result = await decoratorsCollection.updateOne(query, updatedDoc);
-
-      if (status === "approved") {
-        const email = req.body.email;
-        const userQuery = { email };
-        const updateUser = {
+    app.patch(
+      "/decorators/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const status = req.body.status;
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
           $set: {
-            role: "decorator",
+            status: status,
+            workStatus: "available",
           },
         };
-        const result = await userCollection.updateOne(userQuery, updateUser);
+        const result = await decoratorsCollection.updateOne(query, updatedDoc);
+
+        if (status === "approved") {
+          const email = req.body.email;
+          const userQuery = { email };
+          const updateUser = {
+            $set: {
+              role: "decorator",
+            },
+          };
+          const result = await userCollection.updateOne(userQuery, updateUser);
+        }
+        res.send(result);
       }
-      res.send(result);
-    });
+    );
 
     app.delete("/decorators/:id", async (req, res) => {
       const id = req.query.id;
