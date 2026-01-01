@@ -17,7 +17,11 @@ app.use(cors());
 app.use(express.json());
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./style-decor-project-firebase-adminsdk.json");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
+
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -36,14 +40,14 @@ const client = new MongoClient(uri, {
 
 const verifyFBToken = async (req, res, next) => {
   const token = req.headers.authorization;
-  // console.log(token)
+
   if (!token) {
     return res.status(401).send({ message: "unauthorized access" });
   }
   try {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    // console.log("after decoded", decoded);
+
     req.decoded_email = decoded.email;
     next();
   } catch (error) {
@@ -53,7 +57,6 @@ const verifyFBToken = async (req, res, next) => {
 
 async function run() {
   try {
-    await client.connect();
     const db = client.db("style_decor_db_user");
     const userCollection = db.collection("user");
     const serviceCollection = db.collection("service");
@@ -125,7 +128,6 @@ async function run() {
       }
     );
 
-    // service related apis
     app.get("/services", async (req, res) => {
       const cursor = serviceCollection.find();
       const result = await cursor.toArray();
@@ -150,7 +152,6 @@ async function run() {
       res.send(result);
     });
 
-    // booking related apis
     app.get("/bookings", async (req, res) => {
       const query = {};
 
@@ -166,52 +167,222 @@ async function run() {
       const result = await cursor.toArray();
       res.send(result);
     });
+    app.get("/bookings/decorator", async (req, res) => {
+  const { decoratorEmail, serviceStatus } = req.query;
+  const query = {};
+
+  if (decoratorEmail) {
+    query.decoratorEmail = decoratorEmail;
+  }
+
+  
+  if (serviceStatus) {
+    if (serviceStatus === "completed") {
+      query.serviceStatus = "completed";
+    } else {
+   
+      query.serviceStatus = { $nin: ["completed"] };
+    }
+  }
+ 
+  const cursor = bookingCollection.find(query);
+  const result = await cursor.toArray();
+  res.send(result);
+});
     app.post("/bookings", async (req, res) => {
       const booking = req.body;
-      // parcel.createdAt = new Date();
+
       const result = await bookingCollection.insertOne(booking);
       res.send(result);
     });
-  app.patch("/bookings/:id", async (req, res) => {
-  try {
-    const { decoratorId, decoratorName, decoratorEmail } = req.body;
-    const id = req.params.id;
+    app.patch("/bookings/:id", async (req, res) => {
+      try {
+        const { decoratorId, decoratorName, decoratorEmail } = req.body;
+        const id = req.params.id;
 
-    if (!ObjectId.isValid(id) || !ObjectId.isValid(decoratorId)) {
-      return res.status(400).send({ message: "Invalid ID format" });
-    }
+        if (!ObjectId.isValid(id) || !ObjectId.isValid(decoratorId)) {
+          return res.status(400).send({ message: "Invalid ID format" });
+        }
 
-    // 1. Update Booking
-    const bookingResult = await bookingCollection.updateOne(
-      { _id: new ObjectId(id) },
-      {
-        $set: {
-          serviceStatus: "decorator-assigned",
-          decoratorId: decoratorId,
-          decoratorName,
-          decoratorEmail,
-        },
+        const bookingResult = await bookingCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              serviceStatus: "assigned",
+              decoratorResponse: "pending",
+              decoratorId,
+              decoratorName,
+              decoratorEmail,
+            },
+            $push: {
+              statusTimeline: {
+                status: "assigned",
+                updatedAt: new Date(),
+                updatedBy: "admin",
+              },
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          modifiedCount: bookingResult.modifiedCount,
+        });
+      } catch (error) {
+        console.error("Assignment Error:", error);
+        res.status(500).send({ message: "Internal Server Error" });
       }
-    );
-
-    // 2. Update Decorator
-    const decoratorResult = await decoratorsCollection.updateOne(
-      { _id: new ObjectId(decoratorId) },
-      { $set: { workStatus: "busy" } }
-    );
-
-    // Send back success if at least the booking was modified
-    res.send({ 
-      modifiedCount: bookingResult.modifiedCount, 
-      acknowledged: bookingResult.acknowledged 
     });
-  } catch (error) {
-    console.error("Assignment Error:", error);
-    res.status(500).send({ message: "Internal Server Error" });
-  }
-});
+    app.patch("/bookings/:id/accept", verifyFBToken, async (req, res) => {
+      const bookingId = req.params.id;
+      const email = req.decoded_email;
 
-     
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(bookingId),
+        decoratorEmail: email,
+        decoratorResponse: "pending",
+        serviceStatus: "assigned",
+      });
+
+      if (!booking) {
+        return res.status(400).send({ message: "Invalid request" });
+      }
+
+      await bookingCollection.updateOne(
+        { _id: booking._id },
+        {
+          $set: {
+            decoratorResponse: "accepted",
+            serviceStatus: "planning",
+          },
+          $push: {
+            statusTimeline: {
+              status: "planning",
+              updatedAt: new Date(),
+              updatedBy: email,
+            },
+          },
+        }
+      );
+
+      await decoratorsCollection.updateOne(
+        { email },
+        { $set: { workStatus: "busy" } }
+      );
+
+      res.send({ success: true });
+    });
+
+    app.patch("/bookings/:id/reject", verifyFBToken, async (req, res) => {
+      const bookingId = req.params.id;
+      const email = req.decoded_email;
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(bookingId),
+        decoratorEmail: email,
+        decoratorResponse: "pending",
+        serviceStatus: "assigned",
+      });
+
+      if (!booking) {
+        return res.status(400).send({ message: "Invalid request" });
+      }
+
+      await bookingCollection.updateOne(
+        { _id: booking._id },
+        {
+          $set: {
+            decoratorResponse: "rejected",
+            serviceStatus: "pending",
+            decoratorId: null,
+            decoratorEmail: null,
+            decoratorName: null,
+          },
+          $push: {
+            statusTimeline: {
+              status: "rejected-by-decorator",
+              updatedAt: new Date(),
+              updatedBy: email,
+            },
+          },
+        }
+      );
+
+      await decoratorsCollection.updateOne(
+        { email },
+        { $set: { workStatus: "available" } }
+      );
+
+      res.send({ success: true });
+    });
+    app.patch("/bookings/:id/status", verifyFBToken, async (req, res) => {
+      try {
+        const bookingId = req.params.id;
+        const { serviceStatus } = req.body;
+        const email = req.decoded_email;
+
+        const validStatuses = [
+          "planning",
+          "materials-prepared",
+          "on-the-way",
+          "setup-in-progress",
+          "completed",
+        ];
+
+        if (!validStatuses.includes(serviceStatus)) {
+          return res.status(400).send({ message: "Invalid status" });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(bookingId),
+          decoratorEmail: email,
+          decoratorResponse: "accepted",
+        });
+
+        if (!booking) {
+          return res.status(403).send({ message: "Forbidden" });
+        }
+
+        await bookingCollection.updateOne(
+          { _id: booking._id },
+          {
+            $set: { serviceStatus },
+            $push: {
+              statusTimeline: {
+                status: serviceStatus,
+                updatedAt: new Date(),
+                updatedBy: email,
+              },
+            },
+          }
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Status Update Error:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+    app.patch("/bookings/:id/service-date", async (req, res) => {
+      const { id } = req.params;
+      const { serviceDate } = req.body;
+
+      if (!serviceDate) {
+        return res.status(400).send({ message: "Service date required" });
+      }
+
+      const result = await bookingCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            serviceDate,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      res.send(result);
+    });
 
     app.delete("/bookings/:id", async (req, res) => {
       const id = req.params.id;
@@ -332,19 +503,9 @@ async function run() {
       const result = await cursor.toArray();
       res.send(result);
     });
-    // decorators related apis
-    // app.get("/decorators", async (req, res) => {
-    //   const query = {};
-    //   if (req.query.status) {
-    //     query.status = req.query.status;
-    //   }
-    //   const cursor = decoratorsCollection.find(query);
-    //   const result = await cursor.toArray();
-    //   res.send(result);
-    // });
 
     app.get("/decorators", async (req, res) => {
-      const { status, workStatus, district, expertise } = req.query;
+      const { status, workStatus, district } = req.query;
 
       const query = {};
 
@@ -352,22 +513,46 @@ async function run() {
         query.status = status;
       }
 
-      if (workStatus) {
-        query.workStatus = workStatus;
-      }
-
       if (district) {
         query.district = district;
-      }
-
-      if (expertise) {
-        // expertise is an ARRAY in MongoDB
-        query.expertise = { $in: [expertise] };
       }
 
       const decorators = await decoratorsCollection.find(query).toArray();
 
       res.send(decorators);
+    });
+    app.get("/available-decorators", async (req, res) => {
+      const { date, district } = req.query;
+
+      try {
+        const bookingsOnDate = await bookingCollection
+          .find(
+            {
+              serviceDate: date,
+              decoratorEmail: { $ne: null },
+              serviceStatus: { $ne: "completed" },
+            },
+            { projection: { decoratorEmail: 1 } }
+          )
+          .toArray();
+
+        const bookedEmails = bookingsOnDate.map((b) => b.decoratorEmail);
+
+        const query = {
+          status: "approved",
+          email: { $nin: bookedEmails },
+        };
+
+        if (district && district !== "undefined") {
+          query.district = district;
+        }
+
+        const decorators = await decoratorsCollection.find(query).toArray();
+
+        res.send(decorators);
+      } catch (error) {
+        res.status(500).send({ message: "Internal Server Error" });
+      }
     });
 
     app.post("/decorators", async (req, res) => {
@@ -414,10 +599,30 @@ async function run() {
       res.send(result);
     });
 
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    async function autoReleaseDecorators() {
+      const today = new Date().toISOString().split("T")[0];
+
+      const completedBookings = await bookingCollection
+        .find({
+          serviceDate: { $lt: today },
+          serviceStatus: { $ne: "completed" },
+          decoratorEmail: { $ne: null },
+        })
+        .toArray();
+
+      for (const booking of completedBookings) {
+        await bookingCollection.updateOne(
+          { _id: booking._id },
+          { $set: { serviceStatus: "completed" } }
+        );
+
+        await decoratorsCollection.updateOne(
+          { email: booking.decoratorEmail },
+          { $set: { workStatus: "available" } }
+        );
+      }
+    }
+    setInterval(autoReleaseDecorators, 1000 * 60 * 60);
   } finally {
   }
 }

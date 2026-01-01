@@ -1,3 +1,4 @@
 node_modules
 .env
 style-decor-project-firebase-adminsdk.json
+.vercel
