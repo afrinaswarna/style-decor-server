@@ -57,6 +57,9 @@ const verifyFBToken = async (req, res, next) => {
 
 async function run() {
   try {
+    // await client.connect(); // ✅ REQUIRED
+    // console.log("✅ MongoDB connected successfully");
+
     const db = client.db("style_decor_db_user");
     const userCollection = db.collection("user");
     const serviceCollection = db.collection("service");
@@ -86,8 +89,20 @@ async function run() {
       const cursor = userCollection
         .find(query)
         .sort({ createdAt: -1 })
-        .limit(5);
+        
       const result = await cursor.toArray();
+      res.send(result);
+    });
+    // Add this to your Backend User APIs
+    app.get("/users/:email", async (req, res) => {
+      const email = req.params.email;
+      const query = { email: email };
+      const result = await userCollection.findOne(query);
+
+      if (!result) {
+        return res.status(404).send({ message: "User not found in database" });
+      }
+
       res.send(result);
     });
     app.get("/users/:email/role", async (req, res) => {
@@ -99,16 +114,28 @@ async function run() {
 
     app.post("/users", async (req, res) => {
       const user = req.body;
-      user.role = "user";
-      user.createdAt = new Date();
-      email = user.email;
-      const existingUser = await userCollection.findOne({ email });
-      if (existingUser) {
-        return res.send({ massage: "user exist" });
-      }
+      const query = { email: user.email };
 
-      const result = await userCollection.insertOne(user);
-      res.send(result);
+      const updateDoc = {
+        $set: {
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+        },
+        $setOnInsert: {
+          role: "user",
+          createdAt: new Date(),
+        },
+      };
+
+      try {
+        const result = await userCollection.updateOne(query, updateDoc, {
+          upsert: true,
+        });
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Internal Server Error", error });
+      }
     });
     app.patch(
       "/users/:id/role",
@@ -127,6 +154,22 @@ async function run() {
         res.send(result);
       }
     );
+
+    app.patch("/users/update/:email", async (req, res) => {
+      const email = req.params.email;
+      const updatedUser = req.body;
+      const filter = { email: email };
+
+      const updateDoc = {
+        $set: {
+          displayName: updatedUser.displayName,
+          photoURL: updatedUser.photoURL,
+        },
+      };
+
+      const result = await userCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
 
     app.get("/services", async (req, res) => {
       const cursor = serviceCollection.find();
@@ -151,6 +194,34 @@ async function run() {
       const result = await serviceCollection.insertOne(services);
       res.send(result);
     });
+    app.put("/services/:id", async (req, res) => {
+  const id = req.params.id;
+  const filter = { _id: new ObjectId(id) };
+  const updatedDoc = req.body;
+
+  const updateService = {
+    $set: {
+      service_name: updatedDoc.service_name,
+      service_category: updatedDoc.service_category,
+      cost: parseFloat(updatedDoc.cost),
+      unit: updatedDoc.unit,
+      image: updatedDoc.image,
+      shortDescription: updatedDoc.shortDescription,
+      description: updatedDoc.description,
+      features: updatedDoc.features, 
+      gallery: updatedDoc.gallery,  
+    },
+  };
+
+  const result = await serviceCollection.updateOne(filter, updateService);
+  res.send(result);
+});
+    app.delete("/services/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await serviceCollection.deleteOne(query);
+      res.send(result);
+    });
 
     app.get("/bookings", async (req, res) => {
       const query = {};
@@ -168,27 +239,25 @@ async function run() {
       res.send(result);
     });
     app.get("/bookings/decorator", async (req, res) => {
-  const { decoratorEmail, serviceStatus } = req.query;
-  const query = {};
+      const { decoratorEmail, serviceStatus } = req.query;
+      const query = {};
 
-  if (decoratorEmail) {
-    query.decoratorEmail = decoratorEmail;
-  }
+      if (decoratorEmail) {
+        query.decoratorEmail = decoratorEmail;
+      }
 
-  
-  if (serviceStatus) {
-    if (serviceStatus === "completed") {
-      query.serviceStatus = "completed";
-    } else {
-   
-      query.serviceStatus = { $nin: ["completed"] };
-    }
-  }
- 
-  const cursor = bookingCollection.find(query);
-  const result = await cursor.toArray();
-  res.send(result);
-});
+      if (serviceStatus) {
+        if (serviceStatus === "completed") {
+          query.serviceStatus = "completed";
+        } else {
+          query.serviceStatus = { $nin: ["completed"] };
+        }
+      }
+
+      const cursor = bookingCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
     app.post("/bookings", async (req, res) => {
       const booking = req.body;
 
@@ -593,11 +662,16 @@ async function run() {
     );
 
     app.delete("/decorators/:id", async (req, res) => {
-      const id = req.query.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await decoratorsCollection.deleteOne(query);
-      res.send(result);
-    });
+  const id = req.params.id; 
+  
+  if (!id || id === 'undefined') {
+      return res.status(400).send({ message: "Invalid ID provided" });
+  }
+
+  const query = { _id: new ObjectId(id) };
+  const result = await decoratorsCollection.deleteOne(query);
+  res.send(result);
+});
 
     async function autoReleaseDecorators() {
       const today = new Date().toISOString().split("T")[0];
